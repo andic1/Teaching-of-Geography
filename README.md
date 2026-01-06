@@ -22,7 +22,11 @@
 
 **技术深度方面**：  
 底层基于 React + TypeScript + Three.js 自行实现三维地球渲染与交互，包括高分辨率贴图的加载与降级策略、经纬度与三维坐标的双向映射、国家边界 GeoJSON 的射线检测与高亮、任务与收藏驱动的视角平滑定位、以及对大模型接口的缓存和按“课程模式 + 讲解深度”动态生成 Prompt 的机制。手势部分结合 MediaPipe 手部识别，对关键点数据做了二次处理，将其平滑映射为旋转与缩放控制，兼顾了交互的可玩性与课堂场景下的稳定性。
-本项目由阿里云ESA提供加速、计算和保护”以及附右图➡️![Uploading image.png…]()
+
+---
+本项目由阿里云ESA提供加速、计算和保护”以及附右图➡️
+<img width="7534" height="844" alt="image" src="https://github.com/user-attachments/assets/87c8b86c-b137-4e6d-aedc-713a08d02f1e" />
+
 
 
 ## 一、快速体验
