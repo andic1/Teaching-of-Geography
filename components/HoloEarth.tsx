@@ -8,6 +8,10 @@ interface HoloEarthProps {
   onHover: (data: HoverData | null) => void;
   onReady: () => void;
   handControl?: HandControl | null;
+  // 视图图层：普通地表 / 数据高亮（用于比赛展示数据图层）
+  viewLayer?: 'surface' | 'data';
+  // 外部请求将地球对准指定经纬度（课堂笔记回放/教学定位）
+  focusCoords?: Coordinates | null;
 }
 
 // Helper: Convert Lat/Lng to 3D Vector
@@ -22,6 +26,25 @@ const latLngToVector3 = (lat: number, lng: number, radius: number) => {
   const y = radius * Math.cos(phi);
 
   return new THREE.Vector3(x, y, z);
+};
+
+const loadTextureWithFallback = (loader: THREE.TextureLoader, urls: string[]) => {
+  return new Promise<THREE.Texture>((resolve, reject) => {
+    const tryLoad = (idx: number) => {
+      if (idx >= urls.length) {
+        reject(new Error(`All texture urls failed: ${urls.join(", ")}`));
+        return;
+      }
+      loader.load(
+        urls[idx],
+        (tex) => resolve(tex),
+        undefined,
+        () => tryLoad(idx + 1),
+      );
+    };
+
+    tryLoad(0);
+  });
 };
 
 // Helper: Point in Polygon Algorithm (Ray Casting)
@@ -45,12 +68,13 @@ const isPointInPolygon = (point: number[], vs: number[][][]) => {
                 && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
             if (intersect) inside = !inside;
         }
+
     }
     
     return inside;
 };
 
-const HoloEarth: React.FC<HoloEarthProps> = ({ onControlsUpdate, onLocationSelect, onHover, onReady, handControl }) => {
+const HoloEarth: React.FC<HoloEarthProps> = ({ onControlsUpdate, onLocationSelect, onHover, onReady, handControl, viewLayer = 'surface', focusCoords = null }) => {
   const mountRef = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
@@ -74,6 +98,10 @@ const HoloEarth: React.FC<HoloEarthProps> = ({ onControlsUpdate, onLocationSelec
   const lastHoverCheckTime = useRef<number>(0);
   const initializedRef = useRef(false);
   const handControlRef = useRef<HandControl | null>(null);
+  const gridRef = useRef<THREE.LineSegments | null>(null);
+  const earthMaterialRef = useRef<THREE.MeshStandardMaterial | null>(null);
+  const dataOverlayRef = useRef<THREE.Points | null>(null);
+  const targetQuatRef = useRef<THREE.Quaternion | null>(null);
 
   // Handle Resize
   useEffect(() => {
@@ -93,6 +121,23 @@ const HoloEarth: React.FC<HoloEarthProps> = ({ onControlsUpdate, onLocationSelec
   useEffect(() => {
     handControlRef.current = handControl ?? null;
   }, [handControl]);
+
+  // 外部定位：把标记点移动到指定坐标，并让该点平滑转到视野正前方
+  useEffect(() => {
+    if (!focusCoords || !earthGroupRef.current) return;
+
+    const v = latLngToVector3(focusCoords.lat, focusCoords.lng, 1.0);
+
+    if (markerRef.current) {
+      markerRef.current.position.copy(v);
+      markerRef.current.visible = true;
+    }
+
+    const from = v.clone().normalize();
+    const to = new THREE.Vector3(0, 0, 1);
+    const q = new THREE.Quaternion().setFromUnitVectors(from, to);
+    targetQuatRef.current = q;
+  }, [focusCoords]);
 
   // Fetch GeoJSON（改为本地静态资源，部署时放到 public/data/countries.geojson）
   useEffect(() => {
@@ -202,6 +247,8 @@ const HoloEarth: React.FC<HoloEarthProps> = ({ onControlsUpdate, onLocationSelec
 
       // Scene
       const scene = new THREE.Scene();
+      // 教学场景：使用偏浅的蓝灰色背景而不是纯黑太空
+      scene.background = new THREE.Color(0xe5f2ff);
       
       // Camera
       const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000);
@@ -216,8 +263,10 @@ const HoloEarth: React.FC<HoloEarthProps> = ({ onControlsUpdate, onLocationSelec
       });
       renderer.setSize(width, height);
       renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
-      renderer.toneMappingExposure = 1.0;
+      // 略微提高曝光，让整体更接近教科书插图的亮度
+      renderer.toneMappingExposure = 1.28;
       mountNode.appendChild(renderer.domElement);
       rendererRef.current = renderer;
 
@@ -226,7 +275,7 @@ const HoloEarth: React.FC<HoloEarthProps> = ({ onControlsUpdate, onLocationSelec
       earthGroupRef.current = earthGroup;
       scene.add(earthGroup);
 
-      // Textures（改为本地静态资源路径，部署时放到 public/textures/ 下）
+      // Textures（默认使用轻量 2048 贴图，保证首屏加载速度；高清卫星贴图保留为可选资源）
       const textureLoader = new THREE.TextureLoader();
       const earthMap = textureLoader.load('/textures/earth_atmos_2048.jpg');
       const earthSpecular = textureLoader.load('/textures/earth_specular_2048.jpg');
@@ -237,6 +286,20 @@ const HoloEarth: React.FC<HoloEarthProps> = ({ onControlsUpdate, onLocationSelec
       earthNormal.anisotropy = maxAnisotropy;
       earthSpecular.anisotropy = maxAnisotropy;
 
+      // 提升放大时清晰度与色彩准确性（离线可部署，不依赖外部服务）
+      earthMap.colorSpace = THREE.SRGBColorSpace;
+      earthMap.generateMipmaps = true;
+      earthMap.minFilter = THREE.LinearMipmapLinearFilter;
+      earthMap.magFilter = THREE.LinearFilter;
+
+      earthNormal.generateMipmaps = true;
+      earthNormal.minFilter = THREE.LinearMipmapLinearFilter;
+      earthNormal.magFilter = THREE.LinearFilter;
+
+      earthSpecular.generateMipmaps = true;
+      earthSpecular.minFilter = THREE.LinearMipmapLinearFilter;
+      earthSpecular.magFilter = THREE.LinearFilter;
+
       // Geometry & Material
       // Geometry is rotated -90 deg Y to align Prime Meridian with Z axis in latLngToVector3 logic
       const geometry = new THREE.SphereGeometry(1, 128, 128); 
@@ -246,20 +309,23 @@ const HoloEarth: React.FC<HoloEarthProps> = ({ onControlsUpdate, onLocationSelec
         map: earthMap,
         normalMap: earthNormal,
         roughnessMap: earthSpecular,
-        roughness: 0.5,
-        metalness: 0.1,
-        color: 0xffffff,
+        roughness: 0.55,
+        metalness: 0.02,
+        // 略偏冷的柔和白色，让海洋更蓝、陆地更清晰
+        color: new THREE.Color(0xf3f8ff),
       });
 
       const earth = new THREE.Mesh(geometry, material);
       earthMeshRef.current = earth;
+      earthMaterialRef.current = material;
       earthGroup.add(earth);
 
       // Grid Overlay
       const gridGeo = new THREE.WireframeGeometry(new THREE.SphereGeometry(1.001, 36, 36));
       gridGeo.rotateY(-Math.PI / 2);
-      const gridMat = new THREE.LineBasicMaterial({ color: 0x0ea5e9, transparent: true, opacity: 0.08 });
+      const gridMat = new THREE.LineBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.035 });
       const grid = new THREE.LineSegments(gridGeo, gridMat);
+      gridRef.current = grid;
       earthGroup.add(grid);
 
       // Cursor
@@ -283,16 +349,14 @@ const HoloEarth: React.FC<HoloEarthProps> = ({ onControlsUpdate, onLocationSelec
       const markerGlow = new THREE.Mesh(markerGlowGeo, markerGlowMat);
       marker.add(markerGlow);
 
-      // Lights
-      const ambientLight = new THREE.AmbientLight(0xffffff, 0.2); 
+      // Lights（更自然：环境光 + 半球光 + 太阳方向光；教学场景整体提亮，暗面也能看清）
+      const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
       scene.add(ambientLight);
-      const dirLight = new THREE.DirectionalLight(0xffffff, 1.8);
-      dirLight.position.set(5, 3, 5);
+      const hemiLight = new THREE.HemisphereLight(0xe5f2ff, 0xdbe7d3, 0.6);
+      scene.add(hemiLight);
+      const dirLight = new THREE.DirectionalLight(0xffffff, 1.4);
+      dirLight.position.set(6, 3, 6);
       scene.add(dirLight);
-      const spotLight = new THREE.SpotLight(0x00ccff, 3);
-      spotLight.position.set(-5, 0, -2);
-      spotLight.lookAt(0,0,0);
-      scene.add(spotLight);
 
       // Stars
       const starGeo = new THREE.BufferGeometry();
@@ -302,7 +366,7 @@ const HoloEarth: React.FC<HoloEarthProps> = ({ onControlsUpdate, onLocationSelec
         starPos[i] = (Math.random() - 0.5) * 20; 
       }
       starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
-      const starMat = new THREE.PointsMaterial({color: 0xffffff, size: 0.015, transparent: true, opacity: 0.6});
+      const starMat = new THREE.PointsMaterial({color: 0xffffff, size: 0.012, transparent: true, opacity: 0.22});
       const stars = new THREE.Points(starGeo, starMat);
       scene.add(stars);
 
@@ -362,6 +426,24 @@ const HoloEarth: React.FC<HoloEarthProps> = ({ onControlsUpdate, onLocationSelec
              markerRef.current.children[0].lookAt(camera.position);
         }
 
+        // 数据视图热点动画：旋转 + 呼吸
+        if (dataOverlayRef.current) {
+          dataOverlayRef.current.rotation.y += 0.0025;
+          const mat = dataOverlayRef.current.material as THREE.PointsMaterial;
+          const t = Date.now() * 0.004;
+          mat.opacity = 0.55 + Math.sin(t) * 0.25;
+          mat.size = 0.022 + (Math.sin(t) * 0.008);
+        }
+
+        // 外部定位动画：缓慢把目标点转到正前方（与手势/鼠标可叠加，但会自动收敛）
+        if (targetQuatRef.current) {
+          earthGroupRef.current.quaternion.slerp(targetQuatRef.current, 0.08);
+          if (earthGroupRef.current.quaternion.angleTo(targetQuatRef.current) < 0.01) {
+            earthGroupRef.current.quaternion.copy(targetQuatRef.current);
+            targetQuatRef.current = null;
+          }
+        }
+
         if (isDragging.current !== lastReportedDragState.current) {
             onControlsUpdate({ isDragging: isDragging.current });
             lastReportedDragState.current = isDragging.current;
@@ -415,6 +497,56 @@ const HoloEarth: React.FC<HoloEarthProps> = ({ onControlsUpdate, onLocationSelec
       initializedRef.current = false;
     };
   }, [onControlsUpdate, onReady]);
+
+  // 根据视图图层调整材质和简单数据叠加效果
+  useEffect(() => {
+    const material = earthMaterialRef.current;
+    const grid = gridRef.current;
+    const overlay = dataOverlayRef.current;
+    if (!material || !grid || !earthGroupRef.current) return;
+
+    const gridMat = grid.material as THREE.LineBasicMaterial;
+
+    if (viewLayer === 'data') {
+      material.color.setHex(0x0b1120);
+      material.emissive = new THREE.Color(0x22c55e);
+      material.emissiveIntensity = 0.2;
+      gridMat.opacity = 0.22;
+      gridMat.color.setHex(0x22c55e);
+
+      // 构造一个简单的“数据热点”点云叠加（示意用）
+      if (!overlay) {
+        const pts = new Float32Array(3 * 40);
+        for (let i = 0; i < 40; i++) {
+          const lat = -60 + Math.random() * 120;
+          const lng = -180 + Math.random() * 360;
+          const v = latLngToVector3(lat, lng, 1.06);
+          pts[i * 3] = v.x;
+          pts[i * 3 + 1] = v.y;
+          pts[i * 3 + 2] = v.z;
+        }
+        const g = new THREE.BufferGeometry();
+        g.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+        const m = new THREE.PointsMaterial({ color: 0x22c55e, size: 0.03, transparent: true, opacity: 0.85 });
+        const points = new THREE.Points(g, m);
+        dataOverlayRef.current = points;
+        earthGroupRef.current.add(points);
+      }
+    } else {
+      material.color.setHex(0xffffff);
+      material.emissive = new THREE.Color(0x000000);
+      material.emissiveIntensity = 0;
+      gridMat.opacity = 0.08;
+      gridMat.color.setHex(0x0ea5e9);
+
+      if (overlay && earthGroupRef.current) {
+        earthGroupRef.current.remove(overlay);
+        (overlay.geometry as THREE.BufferGeometry).dispose();
+        (overlay.material as THREE.Material).dispose();
+        dataOverlayRef.current = null;
+      }
+    }
+  }, [viewLayer]);
 
   // Coordinate Calculation
   const calculateCoords = (point: THREE.Vector3) => {
@@ -490,6 +622,8 @@ const HoloEarth: React.FC<HoloEarthProps> = ({ onControlsUpdate, onLocationSelec
   const handlePointerDown = (e: React.MouseEvent | React.TouchEvent) => {
     isDragging.current = true;
     rotationVelocity.current = { x: 0, y: 0 };
+    // 一旦用户开始手动拖拽，取消外部定位动画，避免地球自动拉回之前的目标视角
+    targetQuatRef.current = null;
     
     let clientX, clientY;
     if ('touches' in e) {
@@ -616,6 +750,7 @@ const HoloEarth: React.FC<HoloEarthProps> = ({ onControlsUpdate, onLocationSelec
     <div 
         ref={mountRef} 
         className="w-full h-full cursor-crosshair active:cursor-grabbing"
+        style={{ touchAction: 'none' }}
         onMouseDown={handlePointerDown}
         onMouseMove={handlePointerMove}
         onMouseUp={handlePointerUp}

@@ -63,9 +63,11 @@ const HandPanel: React.FC<HandPanelProps> = ({ onControlChange }) => {
       const dist = Math.hypot(dx, dy);
 
       // 只要手掌移动达到一定速度，就直接用于旋转地球
-      const moveThreshold = 0.003; // 越小越敏感
+      // 提高阈值，避免细小抖动就带动地球
+      const moveThreshold = 0.006; // 越小越敏感
       if (dist > moveThreshold) {
-        const sensitivity = 4.0; // 提高一点旋转灵敏度
+        // 略降灵敏度，让课堂演示时旋转更平滑可控
+        const sensitivity = 2.2;
         control = {
           rotX: dy * sensitivity,
           rotY: dx * sensitivity,
@@ -75,12 +77,14 @@ const HandPanel: React.FC<HandPanelProps> = ({ onControlChange }) => {
         // 手基本不动时，才用张合做缩放
         if (lastOpenness.current !== null) {
           const dOpen = openness - lastOpenness.current;
-          const zoomThreshold = 0.005;
+          // 提高缩放阈值，避免轻微张合就频繁缩放
+          const zoomThreshold = 0.01;
           if (Math.abs(dOpen) > zoomThreshold) {
             control = {
               rotX: 0,
               rotY: 0,
-              zoomDelta: -dOpen * 15,
+              // 降低缩放步长，使放大/缩小更平滑
+              zoomDelta: -dOpen * 8,
             };
             info = dOpen > 0 ? '🔍 放大' : '🔍 缩小';
           }
